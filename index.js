@@ -220,7 +220,8 @@ bot.onText(/\/start/, async (msg) => {
     "Commands:\n" +
     "/status — current surge state\n" +
     "/traffic — scan traffic now\n" +
-    "/crowds <city> — check busy places (costs money!)\n" +
+    "/crowds <city> — busy places in 1 city (~$0.02)\n" +
+    "/crowds all — busy places in ALL cities (~$0.26)\n" +
     "/cities — list city IDs\n" +
     "/help — this menu",
     { parse_mode:"Markdown" });
@@ -262,52 +263,82 @@ async function sendStatus(chatId) {
   await bot.sendMessage(chatId, text, { parse_mode:"Markdown" });
 }
 
-// ─── MANUAL CROWDS — costs ~$0.02 per call ───────────────────────────────────
+// ─── MANUAL CROWDS — costs ~$0.02 per city ───────────────────────────────────
+async function scrapeOneCity(city, chatId) {
+  const categories = ["bar", "club", "restaurant"];
+  const items = await runApifyScrape(city.searchArea, categories, 5);
+
+  if (!items || items.length === 0) {
+    await bot.sendMessage(chatId, `*${city.name}*: no places found.`, { parse_mode:"Markdown" });
+    return;
+  }
+
+  const parsed = items.map(parseBusyness).filter(p => p.livePct !== null || p.liveText);
+  const sorted = parsed.sort((a,b) => (b.livePct || 0) - (a.livePct || 0));
+
+  let text = `👥 *Busy places in ${city.name}:*\n\n`;
+  if (sorted.length === 0) {
+    text += "_No live popularity data. Top-rated places:_\n\n";
+    for (const p of items.slice(0,5)) {
+      text += `📍 *${p.title}*\n   ${p.categoryName || ""}${p.totalScore ? ` · ⭐ ${p.totalScore}` : ""}\n\n`;
+    }
+  } else {
+    for (const p of sorted.slice(0,6)) {
+      const barLen = Math.round((p.livePct || 0) / 10);
+      const bar = "█".repeat(barLen) + "░".repeat(10 - barLen);
+      text += `📍 *${p.name}*\n   ${p.category}\n   ${bar} ${p.livePct || 0}%${p.liveText ? ` (${p.liveText})` : ""}\n\n`;
+    }
+  }
+  await bot.sendMessage(chatId, text, { parse_mode:"Markdown" });
+}
+
 bot.onText(/\/crowds(?:\s+(\w+))?/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const cityId = match[1]?.toLowerCase();
+  const arg = match[1]?.toLowerCase();
 
-  if (!cityId) {
-    await bot.sendMessage(chatId, "⚠️ Usage: /crowds <city>\nExample: `/crowds bochum`\nSee /cities for IDs.", { parse_mode:"Markdown" });
+  if (!arg) {
+    await bot.sendMessage(chatId,
+      "⚠️ *Usage:*\n" +
+      "`/crowds <city>` — one city (~$0.02)\n" +
+      "`/crowds all` — all 13 cities (~$0.26)\n\n" +
+      "See /cities for city IDs.",
+      { parse_mode:"Markdown" });
     return;
   }
 
-  const city = CITIES.find(c => c.id === cityId);
+  // ── ALL cities mode ──
+  if (arg === "all") {
+    await bot.sendMessage(chatId,
+      `⟳ Scraping *all ${CITIES.length} cities*...\n` +
+      `_Estimated cost: ~$${(CITIES.length * 0.02).toFixed(2)}_\n` +
+      `_Takes 5-10 minutes._`,
+      { parse_mode:"Markdown" });
+
+    for (const city of CITIES) {
+      try {
+        await bot.sendMessage(chatId, `⟳ ${city.name}...`);
+        await scrapeOneCity(city, chatId);
+      } catch(e) {
+        await bot.sendMessage(chatId, `❌ ${city.name}: ${e.message}`);
+      }
+    }
+    await bot.sendMessage(chatId, "✅ *All cities scanned.*", { parse_mode:"Markdown" });
+    return;
+  }
+
+  // ── Single city mode ──
+  const city = CITIES.find(c => c.id === arg);
   if (!city) {
-    await bot.sendMessage(chatId, `❌ Unknown city: ${cityId}\nUse /cities to see IDs.`);
+    await bot.sendMessage(chatId, `❌ Unknown city: ${arg}\nUse /cities to see IDs.`);
     return;
   }
 
-  await bot.sendMessage(chatId, `⟳ Scraping popular places in *${city.name}*...\n_This costs ~$0.02 and takes 30-60 seconds._`, { parse_mode:"Markdown" });
+  await bot.sendMessage(chatId,
+    `⟳ Scraping *${city.name}*...\n_Cost: ~$0.02, takes 30-60 sec._`,
+    { parse_mode:"Markdown" });
 
   try {
-    const categories = ["bar", "club", "restaurant"];
-    const items = await runApifyScrape(city.searchArea, categories, 5);
-
-    if (!items || items.length === 0) {
-      await bot.sendMessage(chatId, "No places found. Try another city.");
-      return;
-    }
-
-    const parsed = items.map(parseBusyness).filter(p => p.livePct !== null || p.liveText);
-    const sorted = parsed.sort((a,b) => (b.livePct || 0) - (a.livePct || 0));
-
-    let text = `👥 *Busy places in ${city.name} now:*\n\n`;
-    if (sorted.length === 0) {
-      text += "_No live popularity data available right now._\n";
-      text += "Showing top-rated places:\n\n";
-      for (const p of items.slice(0,5)) {
-        text += `📍 *${p.title}*\n   ${p.categoryName || ""}${p.totalScore ? ` · ⭐ ${p.totalScore}` : ""}\n\n`;
-      }
-    } else {
-      for (const p of sorted.slice(0,8)) {
-        const barLen = Math.round((p.livePct || 0) / 10);
-        const bar = "█".repeat(barLen) + "░".repeat(10 - barLen);
-        text += `📍 *${p.name}*\n   ${p.category}\n   ${bar} ${p.livePct || 0}%${p.liveText ? ` (${p.liveText})` : ""}\n\n`;
-      }
-    }
-
-    await bot.sendMessage(chatId, text, { parse_mode:"Markdown" });
+    await scrapeOneCity(city, chatId);
   } catch(e) {
     await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
   }
