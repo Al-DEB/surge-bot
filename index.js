@@ -28,13 +28,57 @@ function loadData() {
 function saveData(d) { fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2)); }
 
 // ─── PARSE FAHRLY/UBER REPORT ─────────────────────────────────────────────────
+// Handles all formats:
+//   German:   1.181,61  →  1181.61
+//   English:  1181.61   →  1181.61
+//   Plain:    1181      →  1181
+//   Mixed:    1,181.61  →  1181.61
+function smartParseNumber(str) {
+  if (!str) return 0;
+  const s = str.trim();
+  const hasComma = s.includes(",");
+  const hasDot   = s.includes(".");
+
+  // Both present → the LAST one is the decimal separator
+  if (hasComma && hasDot) {
+    if (s.lastIndexOf(",") > s.lastIndexOf(".")) {
+      // German: 1.181,61
+      return parseFloat(s.replace(/\./g, "").replace(",", "."));
+    } else {
+      // English: 1,181.61
+      return parseFloat(s.replace(/,/g, ""));
+    }
+  }
+  // Only comma → could be decimal (37,62) or thousands (1,000)
+  if (hasComma) {
+    const parts = s.split(",");
+    // If last group has 1-2 digits → decimal
+    if (parts[parts.length - 1].length <= 2) {
+      return parseFloat(s.replace(",", "."));
+    }
+    // Otherwise → thousands separator
+    return parseFloat(s.replace(/,/g, ""));
+  }
+  // Only dot → could be decimal (1181.61) or thousands (1.181)
+  if (hasDot) {
+    const parts = s.split(".");
+    // If last group has 1-2 digits → decimal
+    if (parts[parts.length - 1].length <= 2) {
+      return parseFloat(s);
+    }
+    // Otherwise → thousands separator (rare)
+    return parseFloat(s.replace(/\./g, ""));
+  }
+  // No separator → plain integer
+  return parseFloat(s);
+}
+
 function parseReport(text) {
-  // Extract numbers like "1.588,23 €" or "1588.23"
   const num = (label) => {
-    const re = new RegExp(label + "\\s*:?\\s*([\\d.,]+)\\s*€?", "i");
+    const re = new RegExp(label + "\\s*:?\\s*(-?[\\d.,]+)\\s*€?", "i");
     const m = text.match(re);
     if (!m) return 0;
-    return parseFloat(m[1].replace(/\./g, "").replace(",", "."));
+    return smartParseNumber(m[1]);
   };
 
   const dateRange = text.match(/(\d+\s+\w+)\s*[–-]\s*(\d+\s+\w+)/);
@@ -353,12 +397,12 @@ async function handleDriverReport(msg, driver) {
 // مصاريف
 async function handleExpense(msg, type, label) {
   const text = msg.text;
-  const m = text.match(/(\d+[\.,]?\d*)/);
+  const m = text.match(/([\d.,]+)/);
   if (!m) {
     await bot.sendMessage(msg.chat.id, `❌ مثال: \`${type} 60\``, { parse_mode:"Markdown" });
     return;
   }
-  const amount = parseFloat(m[1].replace(",", "."));
+  const amount = smartParseNumber(m[1]);
   const data = loadData();
   data.expenses.push({
     type, amount, date: new Date().toISOString(),
